@@ -19,8 +19,12 @@ class TransactionRecord:
     transaction_id: str
     status: str  # e.g. "succeeded"
     kind: str  # "refund" | "void"
-    amount: int  # minor units
+    amount: int  # minor units of money actually MOVED (0 for a void)
     idempotency_key: str
+    # Observability only — the authorized/captured total the movement relates
+    # to. For a void this is the pre-capture authorization that was released
+    # (amount moved is still 0); for a refund it equals amount.
+    authorized_amount: int = 0
 
 
 class PaymentsClient(Protocol):
@@ -31,7 +35,7 @@ class PaymentsClient(Protocol):
     ) -> TransactionRecord: ...
 
     def void(
-        self, order_id: str, idempotency_key: str
+        self, order_id: str, idempotency_key: str, authorized_amount: int = 0
     ) -> TransactionRecord: ...
 
 
@@ -55,20 +59,32 @@ class StubPaymentsClient:
             order_id=order_id,
             amount=amount,
             idempotency_key=idempotency_key,
+            # For a refund, the money moved IS the authorized amount.
+            authorized_amount=amount,
         )
 
-    def void(self, order_id: str, idempotency_key: str) -> TransactionRecord:
-        # A void releases the full pre-capture authorization; amount is 0 here
-        # because nothing was captured/settled.
+    def void(
+        self, order_id: str, idempotency_key: str, authorized_amount: int = 0
+    ) -> TransactionRecord:
+        # A void releases the pre-capture authorization; amount MOVED is 0
+        # because nothing was captured/settled. authorized_amount carries the
+        # released total for observability so the void isn't indistinguishable
+        # from a $0 event.
         return self._record(
             kind="void",
             order_id=order_id,
             amount=0,
             idempotency_key=idempotency_key,
+            authorized_amount=authorized_amount,
         )
 
     def _record(
-        self, kind: str, order_id: str, amount: int, idempotency_key: str
+        self,
+        kind: str,
+        order_id: str,
+        amount: int,
+        idempotency_key: str,
+        authorized_amount: int,
     ) -> TransactionRecord:
         existing = self._by_key.get(idempotency_key)
         if existing is not None:
@@ -88,6 +104,7 @@ class StubPaymentsClient:
             kind=kind,
             amount=amount,
             idempotency_key=idempotency_key,
+            authorized_amount=authorized_amount,
         )
         self._by_key[idempotency_key] = record
         return record
