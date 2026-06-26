@@ -1,0 +1,25 @@
+{
+  "event": "order_failed",
+  "version": "0.1-draft",
+  "order_id": "ord_8f3a2c19",
+  "attempt_id": "att_01",
+  "idempotency_key": "ord_8f3a2c19:att_01",
+  "failure_reason": "no_courier_assigned",
+  "_failure_reason_enum": [
+    "merchant_cancelled",
+    "merchant_rejected",
+    "store_closed_timeout",
+    "no_courier_assigned",
+    "payment_void_pre_capture",
+    "never_delivered_claim",
+    "missing_items_claim",
+    "wrong_items_claim"
+  ],
+  "confidence": "deterministic",
+  "_confidence_enum": ["deterministic", "corroborated", "self_reported"],
+  "captured_amount": { "currency": "USD", "subtotal": 1840, "fees": 399, "tax": 165, "tip": 400, "promo": -500, "total": 2304 },
+  "merchant_id": "mer_4421",
+  "courier_id": null,
+  "customer_id": "cus_77d1",
+  "occurred_at": "2026-06-26T19:04:11Z"
+}
