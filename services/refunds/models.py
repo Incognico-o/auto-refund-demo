@@ -59,7 +59,7 @@ class CapturedAmount:
         if not isinstance(data, Mapping):
             raise EventValidationError("captured_amount must be an object")
         try:
-            return cls(
+            amount = cls(
                 currency=_require_str(data, "currency"),
                 subtotal=_require_int(data, "subtotal"),
                 fees=_require_int(data, "fees"),
@@ -72,6 +72,24 @@ class CapturedAmount:
             raise EventValidationError(
                 f"captured_amount missing field: {exc.args[0]}"
             ) from exc
+
+        # Arithmetic invariant: total must equal the sum of the components
+        # (promo is negative). A payload whose total doesn't reconcile is
+        # untrustworthy — reject rather than refund a wrong amount.
+        components = (
+            amount.subtotal
+            + amount.fees
+            + amount.tax
+            + amount.tip
+            + amount.promo
+        )
+        if amount.total != components:
+            raise EventValidationError(
+                "captured_amount.total "
+                f"({amount.total}) does not equal subtotal+fees+tax+tip+promo "
+                f"({components})"
+            )
+        return amount
 
 
 @dataclass(frozen=True)
@@ -121,6 +139,21 @@ def parse_order_failed(data: Mapping[str, Any]) -> OrderFailedEvent:
     if confidence not in VALID_CONFIDENCE:
         raise EventValidationError(f"unknown confidence: {confidence!r}")
 
+    # Confidence/reason consistency: deterministic backend-recorded reasons must
+    # not arrive flagged as self_reported, and self-reported claims must carry
+    # self_reported confidence. A contradiction means the producer mislabelled
+    # the event — reject rather than auto-process on a confused signal.
+    if failure_reason in DETERMINISTIC_REASONS and confidence == "self_reported":
+        raise EventValidationError(
+            f"deterministic reason {failure_reason!r} cannot have "
+            "confidence 'self_reported'"
+        )
+    if failure_reason in SELF_REPORTED_REASONS and confidence != "self_reported":
+        raise EventValidationError(
+            f"self-reported reason {failure_reason!r} must have "
+            f"confidence 'self_reported', got {confidence!r}"
+        )
+
     if "captured_amount" not in data:
         raise EventValidationError("missing field: captured_amount")
     captured_amount = CapturedAmount.from_dict(data["captured_amount"])
@@ -129,12 +162,26 @@ def parse_order_failed(data: Mapping[str, Any]) -> OrderFailedEvent:
     if courier_id is not None and not isinstance(courier_id, str):
         raise EventValidationError("courier_id must be a string or null")
 
+    order_id = _require_str(data, "order_id")
+    attempt_id = _require_str(data, "attempt_id")
+    idempotency_key = _require_str(data, "idempotency_key")
+    # Idempotency key shape is owned by Orders and defined as
+    # "{order_id}:{attempt_id}" (see docs/payments-contract.DRAFT.md and the
+    # schema example). Enforce it so the key can't drift from the identity it
+    # claims to represent — this underpins the handler's replay guard.
+    expected_key = f"{order_id}:{attempt_id}"
+    if idempotency_key != expected_key:
+        raise EventValidationError(
+            f"idempotency_key {idempotency_key!r} must equal "
+            f"'{{order_id}}:{{attempt_id}}' ({expected_key!r})"
+        )
+
     return OrderFailedEvent(
         event=event,
         version=_require_str(data, "version"),
-        order_id=_require_str(data, "order_id"),
-        attempt_id=_require_str(data, "attempt_id"),
-        idempotency_key=_require_str(data, "idempotency_key"),
+        order_id=order_id,
+        attempt_id=attempt_id,
+        idempotency_key=idempotency_key,
         failure_reason=failure_reason,
         confidence=confidence,
         captured_amount=captured_amount,
