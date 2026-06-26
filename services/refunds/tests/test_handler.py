@@ -16,6 +16,8 @@ from refunds import (
     ResultStatus,
     StubPaymentsClient,
 )
+from refunds.handler import IdempotencyKeyCollision, RefundResult
+from refunds.decision import Decision, DecisionType
 
 from .conftest import make_event
 
@@ -32,9 +34,9 @@ class CountingPayments:
         self.refund_calls += 1
         return self._inner.refund(order_id, amount, idempotency_key)
 
-    def void(self, order_id: str, idempotency_key: str):
+    def void(self, order_id: str, idempotency_key: str, authorized_amount: int = 0):
         self.void_calls += 1
-        return self._inner.void(order_id, idempotency_key)
+        return self._inner.void(order_id, idempotency_key, authorized_amount)
 
 
 # --- happy path REFUND ------------------------------------------------------
@@ -88,6 +90,10 @@ def test_happy_path_void(notifier, chargebacks):
     assert payments.refund_calls == 0
     assert result.transaction is not None
     assert result.transaction.kind == "void"
+    # fix #5: money MOVED is 0, but the authorized/captured total is carried
+    # for observability so a void isn't indistinguishable from a $0 event.
+    assert result.transaction.amount == 0
+    assert result.transaction.authorized_amount == 2304
     assert len(notifier.sent) == 1
     assert notifier.sent[0].kind == "void"
 
@@ -188,3 +194,46 @@ def test_processes_schema_example(handler):
     assert result.transaction.amount == 2304
     assert result.order_id == "ord_8f3a2c19"
     assert result.idempotency_key == "ord_8f3a2c19:att_01"
+
+
+# --- fix #2: idempotency key collision across orders is rejected ------------
+
+
+def test_key_collision_across_orders_is_rejected(notifier, chargebacks):
+    """A cached result for a DIFFERENT order under the same key must not be
+    replayed (and must move no money). With fix #1 enforcing key shape this is
+    unreachable via normal input, so we seed the store directly to prove the
+    handler's defense-in-depth check refuses rather than returns the wrong
+    transaction."""
+    payments = CountingPayments()
+    store = InMemoryIdempotencyStore()
+    # Seed a result that belongs to a different order/attempt under this key.
+    store.set(
+        "ord_test_001:att_01",
+        RefundResult(
+            status=ResultStatus.PROCESSED,
+            decision=Decision(
+                decision=DecisionType.AUTO_PROCESS,
+                kind=MovementKind.REFUND,
+                amount=500,
+                reason="seeded",
+            ),
+            idempotency_key="ord_test_001:att_01",
+            order_id="ord_DIFFERENT",
+            attempt_id="att_01",
+        ),
+    )
+    handler = RefundHandler(
+        payments=payments,
+        notifier=notifier,
+        idempotency_store=store,
+        chargebacks=chargebacks,
+    )
+
+    with pytest.raises(IdempotencyKeyCollision):
+        handler.handle_raw(make_event(failure_reason="no_courier_assigned"))
+
+    # No money moved, no notification sent on the collision.
+    assert payments.refund_calls == 0
+    assert payments.void_calls == 0
+    assert notifier.sent == []

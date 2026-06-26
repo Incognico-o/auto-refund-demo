@@ -22,8 +22,25 @@ Trust-score / dollar-cap handling for these is explicitly future work.
 - **Idempotency:** keyed on the event `idempotency_key` (`order_id:attempt_id`).
   A double-fire returns the original result — no second money movement, no
   duplicate notification. The Payments stub is independently idempotent too.
+  The key shape is enforced at parse time, and a cache hit additionally verifies
+  the stored result belongs to the same `order_id`/`attempt_id` (a collision
+  raises `IdempotencyKeyCollision` rather than replaying the wrong result).
 - **Double-pay / chargeback:** if a chargeback already landed for the order, the
   refund is **suppressed** (`SUPPRESSED_CHARGEBACK`) and no money is moved.
+
+### Input validation (`parse_order_failed`)
+Beyond per-field type checks, the parser rejects (`EventValidationError`):
+- `idempotency_key` that isn't exactly `"{order_id}:{attempt_id}"`,
+- `captured_amount.total` that doesn't equal `subtotal+fees+tax+tip+promo`
+  (`promo` is negative),
+- a `confidence` that contradicts the `failure_reason` (deterministic reasons
+  can't be `self_reported`; self-reported claims must be `self_reported`).
+
+### Void observability
+A void moves `$0` (nothing was captured), so `TransactionRecord.amount == 0`.
+The released pre-capture authorization is carried on
+`TransactionRecord.authorized_amount` so a void is distinguishable from a genuine
+`$0` event. `authorized_amount` is observability only — never treated as moved money.
 
 ## Layout
 
