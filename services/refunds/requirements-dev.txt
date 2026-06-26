@@ -1,0 +1,2 @@
+# Dev/test dependencies only. Runtime uses the Python standard library alone.
+pytest>=7

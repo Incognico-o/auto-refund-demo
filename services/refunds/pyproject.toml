@@ -1,0 +1,18 @@
+[project]
+name = "auto-refund"
+version = "0.1.0"
+description = "Auto-Refund MVP (Orders side): consume order_failed and issue idempotent void/refund."
+requires-python = ">=3.10"
+# Runtime is standard-library only — no third-party dependencies.
+dependencies = []
+
+[project.optional-dependencies]
+# Dev/test only. Install with: pip install -e ".[dev]"  (or: pip install pytest)
+dev = ["pytest>=7"]
+
+[tool.pytest.ini_options]
+# Make `import refunds` resolve to this directory's package. pythonpath is
+# relative to this file (rootdir); ".." is the parent `services/` dir, whose
+# child package directory is `refunds/`.
+pythonpath = [".."]
+testpaths = ["tests"]
