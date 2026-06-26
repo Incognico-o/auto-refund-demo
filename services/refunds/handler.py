@@ -33,6 +33,14 @@ from .notifications import (
 from .payments import PaymentsClient, StubPaymentsClient, TransactionRecord
 
 
+class IdempotencyKeyCollision(Exception):
+    """Raised when an idempotency_key maps to a result for a different order.
+
+    Signals corrupt input or a key-generation bug — never silently swallowed,
+    because the safe action is to refuse rather than replay the wrong result.
+    """
+
+
 class ResultStatus(str, Enum):
     """Terminal status of handling an event."""
 
@@ -49,6 +57,9 @@ class RefundResult:
     decision: Decision
     idempotency_key: str
     order_id: str
+    # Request identity carried so a cache hit can verify the stored result
+    # belongs to the SAME order/attempt (defense-in-depth for the replay guard).
+    attempt_id: str = ""
     transaction: TransactionRecord | None = None
     notification: Notification | None = None
     # True only when returned from the idempotency cache on a replay.
@@ -60,6 +71,7 @@ class RefundResult:
             decision=self.decision,
             idempotency_key=self.idempotency_key,
             order_id=self.order_id,
+            attempt_id=self.attempt_id,
             transaction=self.transaction,
             notification=self.notification,
             replayed=value,
@@ -94,9 +106,22 @@ class RefundHandler:
         """Process a parsed event, idempotently."""
         key = event.idempotency_key
 
-        # (2) Idempotency: replay the original result on a double-fire.
+        # (2) Idempotency: replay the original result on a double-fire — but
+        # only if the cached result is for the SAME order/attempt. fix #1 makes
+        # the key shape "{order_id}:{attempt_id}", so a collision here should be
+        # impossible; we still verify explicitly rather than risk returning
+        # another order's transaction or moving money under a confused key.
         cached = self.idempotency_store.get(key)
         if cached is not None:
+            if (
+                cached.order_id != event.order_id
+                or cached.attempt_id != event.attempt_id
+            ):
+                raise IdempotencyKeyCollision(
+                    f"idempotency_key {key!r} already maps to "
+                    f"{cached.order_id}:{cached.attempt_id}, refusing to replay "
+                    f"for {event.order_id}:{event.attempt_id}"
+                )
             return cached.with_replayed(True)
 
         # (3) Decide.
@@ -110,6 +135,7 @@ class RefundHandler:
                     decision=decision,
                     idempotency_key=key,
                     order_id=event.order_id,
+                    attempt_id=event.attempt_id,
                 ),
             )
 
@@ -122,13 +148,18 @@ class RefundHandler:
                     decision=decision,
                     idempotency_key=key,
                     order_id=event.order_id,
+                    attempt_id=event.attempt_id,
                 ),
             )
 
         # (5) Move money via Payments (itself idempotent on the same key).
         if decision.kind is MovementKind.VOID:
+            # decision.amount is the captured/authorized total; pass it for
+            # observability. The void moves $0 (nothing was captured).
             transaction = self.payments.void(
-                order_id=event.order_id, idempotency_key=key
+                order_id=event.order_id,
+                idempotency_key=key,
+                authorized_amount=decision.amount or 0,
             )
         elif decision.kind is MovementKind.REFUND:
             assert decision.amount is not None  # guaranteed for AUTO_PROCESS
@@ -163,6 +194,7 @@ class RefundHandler:
                 decision=decision,
                 idempotency_key=key,
                 order_id=event.order_id,
+                attempt_id=event.attempt_id,
                 transaction=transaction,
                 notification=notification,
             ),
